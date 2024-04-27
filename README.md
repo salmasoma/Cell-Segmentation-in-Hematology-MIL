@@ -31,7 +31,7 @@ cd Cell-Segmentation-in-Hematology-MIL
 pip install -r requirements.txt`
 ```
 
-## Methodology
+Methodology
 
 ### Data Preprocessing
 
