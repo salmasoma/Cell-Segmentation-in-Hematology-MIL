@@ -13,9 +13,23 @@ Leukemia is a complex blood cancer characterized by the rapid proliferation of a
 * `Segmentation/`: Source code for training the DeepLabV3 segmentation model and inferencing the segmentation masks
 * `Radiomics Features/`: Source code to extract the radiomics features of white blood cells using generated masks
 * `Multi-Modal Model/`: This folder contains code to train the multi-modal model with ViT and ConvNext model along with radiomics tabular features
-* `Multi-Modal Model/`: This folder contains code to train the multi-modal model with ViT and ConvNext model along with radiomics tabular features
+* `Mask Attention/`: Source code for ablation experiment to use mask attention to aid in classification
+* `Tabular Attention/`: Source code for ablation experiment to implement tabular attention
+* `Multiple Instance Learning/`: This folder contains code to train the MIL model to patchify histopathology images and use bagging to predict diagnosis
 * `README.md`: Overview and setup instructions.
 * `requirements.txt`: Required libraries for the project.
+
+
+
+## Installation
+
+Clone this repository and install the required Python packages:
+
+```bash
+git clone https://github.com/salmasoma/Cell-Segmentation-in-Hematology-MIL.git
+cd Cell-Segmentation-in-Hematology-MIL 
+pip install -r requirements.txt`
+```
 
 ## Methodology
 
