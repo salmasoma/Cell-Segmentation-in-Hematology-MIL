@@ -19,8 +19,6 @@ Leukemia is a complex blood cancer characterized by the rapid proliferation of a
 * `README.md`: Overview and setup instructions.
 * `requirements.txt`: Required libraries for the project.
 
-
-
 ## Installation
 
 Clone this repository and install the required Python packages:
@@ -31,7 +29,23 @@ cd Cell-Segmentation-in-Hematology-MIL
 pip install -r requirements.txt`
 ```
 
-Methodology
+## Training
+
+To train the classification models:
+
+```bash
+cd Classification
+pythin train.py
+```
+
+To train the Multiple Instance Learning Models:
+
+```bash
+cd "Multiple Instance Learning"
+python main.py --dataset_name RA --PATH_patches data.csv --embedding_vector_size 1024 --learning_rate 0.0001 --pooling_ratio 0.7 --heads 2 --K 3 --train_fraction 0.7 --num_epochs 30 --n_classes 5
+```
+
+## Methodology
 
 ### Data Preprocessing
 
