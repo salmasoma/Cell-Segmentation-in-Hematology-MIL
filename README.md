@@ -6,6 +6,11 @@ This repository contains the implementation and documentation for our research o
 
 Leukemia is a complex blood cancer characterized by the rapid proliferation of abnormal blood cells. Accurate classification of leukemia subtypes is crucial due to their distinct progression rates and treatment responses. Our research tackles the inherent challenges of subtype differentiation by leveraging advanced segmentation to examine cellular structures meticulously, employing MIL to consider each patient’s samples collectively, thus ensuring unified diagnostic outputs.
 
+## Architectures
+
+
+<img src="figs/mil_2.png" alt="arc" width="300"/>
+
 
 ## Repository Structure
 
