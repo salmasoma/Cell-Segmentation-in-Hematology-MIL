@@ -8,8 +8,9 @@ Leukemia is a complex blood cancer characterized by the rapid proliferation of a
 
 ## Architectures
 
+MIL Architecture:
 
-<img src="figs/mil_2.png" alt="arc" width="300"/>
+<img src="figs/mil_2.png" alt="MIL Architecture" width="900"/>
 
 
 ## Repository Structure
