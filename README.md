@@ -38,6 +38,7 @@ Leukemia is a complex blood cancer characterized by the rapid proliferation of a
 * `Mask Attention/`: Source code for ablation experiment to use mask attention to aid in classification
 * `Tabular Attention/`: Source code for ablation experiment to implement tabular attention
 * `Multiple Instance Learning/`: This folder contains code to train the MIL model to patchify histopathology images and use bagging to predict diagnosis
+* `data/`: This folder contains demo input and output files to test the code
 * `README.md`: Overview and setup instructions.
 * `requirements.txt`: Required libraries for the project.
 
