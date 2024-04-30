@@ -67,7 +67,9 @@ To train the Multiple Instance Learning Models:
 cd "Multiple Instance Learning"
 python main.py --dataset_name RA --PATH_patches data.csv --embedding_vector_size 1024 --learning_rate 0.0001 --pooling_ratio 0.7 --heads 2 --K 3 --train_fraction 0.7 --num_epochs 30 --n_classes 5
 ```
+## Model Weights
 
+Weights of best models achieved can be downloaded from [Link](https://mbzuaiac-my.sharepoint.com/:f:/g/personal/salma_hassan_mbzuai_ac_ae/Emj8dwmytAtErrEd7l-rOgUBXxp78DlXMYq8w7RmhREvxA?e=QjtZfZ)
 ## Methodology
 
 ### Data Preprocessing
