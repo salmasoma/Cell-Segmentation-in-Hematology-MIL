@@ -116,7 +116,7 @@ def create_mask(resized_dir, masks_dir):
     # If you are working with an auxiliary classifier, you should also adjust it
     if model.aux_classifier is not None:
         model.aux_classifier[4] = torch.nn.Conv2d(256, 1, kernel_size=(1, 1), stride=(1, 1))
-    checkpoint = "deeplab_v3_checkpoint.tar"
+    checkpoint = torch.load("my_checkpoint_448.pth.tar")
     model.load_state_dict(checkpoint["state_dict"])
 
     # Instantiate the inference dataset and dataloader
