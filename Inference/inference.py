@@ -10,7 +10,33 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import csv
 import re 
+import pandas as pd
+import pickle
+import random
+import torch.nn as nn
+from torchvision import models
+from sklearn.neighbors import kneighbors_graph
+from torch_geometric.data import Data
+import torch.nn.functional as F
+from torch_geometric.nn import GATv2Conv
+from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
+from torch_geometric.nn import SAGPooling
+import torch.optim as optim
+import zipfile
+import gc
+import argparse
 
+# Transform for the inference dataset
+infer_transforms = A.Compose(
+    [
+        A.Resize(height=448, width=448),
+        A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0], max_pixel_value=255.0),
+        ToTensorV2(),
+    ],
+)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+use_gpu = torch.cuda.is_available()
 
 # Preprocessing 
 def normalization(input_dir):
@@ -83,14 +109,6 @@ class InferenceDataset(Dataset):
             image = augmented['image']
         return image, img_path
 
-# Transform for the inference dataset
-infer_transforms = A.Compose(
-    [
-        A.Resize(height=448, width=448),
-        A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0], max_pixel_value=255.0),
-        ToTensorV2(),
-    ],
-)
 
 def create_mask(resized_dir, masks_dir):
     model = torch.hub.load('pytorch/vision:v0.8.0', 'deeplabv3_resnet50', pretrained=True)
@@ -98,7 +116,7 @@ def create_mask(resized_dir, masks_dir):
     # If you are working with an auxiliary classifier, you should also adjust it
     if model.aux_classifier is not None:
         model.aux_classifier[4] = torch.nn.Conv2d(256, 1, kernel_size=(1, 1), stride=(1, 1))
-    checkpoint = ""
+    checkpoint = "deeplab_v3_checkpoint.tar"
     model.load_state_dict(checkpoint["state_dict"])
 
     # Instantiate the inference dataset and dataloader
@@ -106,7 +124,6 @@ def create_mask(resized_dir, masks_dir):
     infer_loader = DataLoader(infer_dataset, batch_size=1, shuffle=False)
 
     model.eval()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for idx, (x, img_path) in enumerate(infer_loader):
         x = x.to(device=device)
         with torch.no_grad():
@@ -199,6 +216,7 @@ def create_patches(resized_dir, processed_masks_dir, patches_dir):
                 # Save each cell with a unique filename
                 cell_count += 1
                 cell_filename = f"{os.path.splitext(filename)[0]}_{cell_count}.png"
+                os.makedirs(patches_dir, exist_ok=True)
                 cell_output_path = os.path.join(patches_dir, cell_filename)
                 pil_img.save(cell_output_path)
 
@@ -232,4 +250,379 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
                     # Write data to CSV
                     writer.writerow([filename, location, subtype, patient_id, label])
 
+class Loaders:
+
+    def train_test_ids(self, df, train_fraction, random_state, patient_id, label, subset=False, split_column='train/test'):
+        """
+        Splits the IDs based on 'train' or 'test' values in a specified column of the dataframe.
+
+        Args:
+            df (pd.DataFrame): The DataFrame containing the data.
+            train_fraction (float): The fraction of data to be used for training (not used here but retained for compatibility).
+            random_state (int): The random state for reproducibility (not used here but retained for compatibility).
+            patient_id (str): The column name containing patient IDs.
+            label (str): The column name containing labels (not used here but retained for compatibility).
+            subset (bool): Whether to create a subset for smaller experimental runs.
+            split_column (str): The column name to decide train/test split.
+
+        Returns:
+            tuple: A tuple containing full file IDs, train IDs, and test IDs.
+        """
+        train_ids = df[df[split_column] == 'train'][patient_id].unique().tolist()
+        test_ids = df[df[split_column] == 'test'][patient_id].unique().tolist()
+        file_ids = sorted(set(train_ids + test_ids))
+    
+        if subset:
+            train_subset_ids = random.sample(train_ids, 10)
+            test_subset_ids = random.sample(test_ids, 5)
+            return file_ids, train_subset_ids, test_subset_ids
+    
+        return file_ids, train_ids, test_ids
+
+    def df_loader(self, df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False):
+        """
+        Loads the training and testing DataFrame subsets based on patient IDs.
+
+        Args:
+            df (pd.DataFrame): The full DataFrame.
+            train_transform (callable): Transformations to apply to the training data.
+            test_transform (callable): Transformations to apply to the testing data.
+            train_ids (list): List of patient IDs for training.
+            test_ids (list): List of patient IDs for testing.
+            patient_id (str): The column name containing patient IDs.
+            label (str): The label column name.
+            subset (bool): If True, use only a subset of data (not used here but retained for compatibility).
+
+        Returns:
+            tuple: Training and testing DataFrame subsets.
+        """
+        train_subset = df[df[patient_id].isin(train_ids)].reset_index(drop=True)
+        test_subset = df[df[patient_id].isin(test_ids)].reset_index(drop=True)
+        return train_subset, test_subset
+
+    def slides_dataloader(self, train_sub, test_sub, train_ids, test_ids, train_transform, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
+        """
+        Creates data loaders for the training and testing subsets.
+
+        Args:
+            train_sub (pd.DataFrame): Training subset DataFrame.
+            test_sub (pd.DataFrame): Testing subset DataFrame.
+            train_ids (list): List of patient IDs for training data loaders.
+            test_ids (list): List of patient IDs for testing data loaders.
+            train_transform (callable): Transformations for the training data.
+            test_transform (callable): Transformations for the testing data.
+            slide_batch (int): Batch size for the data loaders.
+            num_workers (int): Number of workers for data loading.
+            shuffle (bool): Whether to shuffle the data loaders.
+            collate (callable): Collate function for the data loaders.
+            label (str): Label column name.
+            patient_id (str): Patient ID column name.
+
+        Returns:
+            tuple: Dictionaries of data loaders for training and testing subsets.
+        """
+        # TRAIN dict
+        train_subsets = {}
+        for file in train_ids:
+            new_key = f'{file}'
+            train_subset = train_sub[train_sub[patient_id] == file]
+            train_subsets[new_key] = torch.utils.data.DataLoader(train_subset, batch_size=slide_batch, shuffle=shuffle, num_workers=num_workers, drop_last=False, collate_fn=collate)
+
+        # TEST dict
+        test_subsets = {}
+        for file in test_ids:
+            new_key = f'{file}'
+            test_subset = test_sub[test_sub[patient_id] == file]
+            test_subsets[new_key] = torch.utils.data.DataLoader(test_subset, batch_size=slide_batch, shuffle=False, num_workers=num_workers, drop_last=False, collate_fn=collate)
+
+        return train_subsets, test_subsets
+
+class VGG_embedding(nn.Module):
+
+    """
+    VGG16 embedding network for WSI patches
+    """
+
+    def __init__(self, embedding_vector_size=1024, n_classes=2):
+
+        super(VGG_embedding, self).__init__()
+
+        embedding_net = models.vgg16_bn(pretrained=True)
+
+        # Freeze training for all layers
+        for param in embedding_net.parameters():
+            param.require_grad = False
+
+        # Newly created modules have require_grad=True by default
+        num_features = embedding_net.classifier[6].in_features
+        features = list(embedding_net.classifier.children())[:-1] # Remove last layer
+        features.extend([nn.Linear(num_features, embedding_vector_size)])
+        features.extend([nn.Dropout(0.5)])
+        features.extend([nn.Linear(embedding_vector_size, n_classes)]) # Add our layer with n outputs
+        embedding_net.classifier = nn.Sequential(*features) # Replace the model classifier
+
+        features = list(embedding_net.classifier.children())[:-2] # Remove last layer
+        embedding_net.classifier = nn.Sequential(*features)
+        self.vgg_embedding = nn.Sequential(embedding_net)
+
+    def forward(self, x):
+
+        output = self.vgg_embedding(x)
+        output = output.view(output.size()[0], -1)
+        return output
+
+def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
+
+    graph_dict = dict()
+    embedding_dict = dict()
+
+    embedding_net.eval()
+    with torch.no_grad():
+
+        for patient_ID, slide_loader in loader.items():
+            patient_embedding = []
+    
+            for patch in slide_loader:
+                inputs, label = patch
+                label = label[0].unsqueeze(0)
+                
+                if use_gpu:
+                    inputs, label = inputs.to(device), label.to(device)
+                else:
+                    inputs, label = inputs, label
+    
+                embedding = embedding_net(inputs)
+                embedding = embedding.to('cpu')
+                embedding = embedding.squeeze(0).squeeze(0)
+                patient_embedding.append(embedding)
+    
+            try:
+                patient_embedding = torch.cat(patient_embedding)
+            except RuntimeError:
+                continue
+            
+            embedding_dict[patient_ID] = [patient_embedding.to('cpu'), label.to('cpu')]
+
+            knn_graph = kneighbors_graph(patient_embedding.reshape(-1, 1), k, mode=mode, include_self=include_self)
+            edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
+            data = Data(x=patient_embedding, edge_index=edge_index)
+        
+            graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
+    
+    return graph_dict, embedding_dict
+
+class GAT_SAGPool(torch.nn.Module):
+
+    """Graph Attention Network for full slide graph"""
+
+    def __init__(self, dim_in, heads=2, pooling_ratio=0.7):
+
+        super().__init__()
+
+        self.pooling_ratio = pooling_ratio
+        self.heads = heads
+
+        self.gat1 = GATv2Conv(dim_in, 512, heads=self.heads, concat=False)
+        self.gat2 = GATv2Conv(512, 512, heads=self.heads, concat=False)
+        self.gat3 = GATv2Conv(512, 512, heads=self.heads, concat=False)
+        self.gat4 = GATv2Conv(512, 512, heads=self.heads, concat=False)
+
+        self.topk1 = SAGPooling(512, pooling_ratio)
+        self.topk2 = SAGPooling(512, pooling_ratio)
+        self.topk3 = SAGPooling(512, pooling_ratio)
+        self.topk4 = SAGPooling(512, pooling_ratio)
+
+        self.lin1 = torch.nn.Linear(512 * 2, 512)
+        self.lin2 = torch.nn.Linear(512, 512 // 2)
+        self.lin3 = torch.nn.Linear(512 // 2, 5)
+
+
+    def forward(self, data):
+
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = self.gat1(x, edge_index)
+        x = F.relu(x)
+        #x = F.dropout(x, p=0.1, training=self.training)
+        x, edge_index, _, batch, _, _= self.topk1(x, edge_index, None, batch)
+        x1 = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
+
+        x = self.gat2(x, edge_index)
+        x = F.relu(x)
+        #x = F.dropout(x, p=0.1, training=self.training)
+        x, edge_index, _, batch, _, _= self.topk2(x, edge_index, None, batch)
+        x2 = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
+
+        x = self.gat3(x, edge_index)
+        x = F.relu(x)
+        #x = F.dropout(x, p=0.1, training=self.training)
+        x, edge_index, _, batch, _, _= self.topk3(x, edge_index, None, batch)
+        x3 = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
+
+        x = self.gat4(x, edge_index)
+        x = F.relu(x)
+        #x = F.dropout(x, p=0.1, training=self.training)
+        x, edge_index, _, batch, _, _= self.topk4(x, edge_index, None, batch)
+        x4 = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
+
+        x = x1 + x2 + x3 + x4
+
+        x = self.lin1(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = self.lin2(x)
+        x = F.relu(x)
+        x_logits = self.lin3(x)
+        x_out = F.softmax(x_logits, dim=1)
+
+        return x_logits, x_out
+
+def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=2):
+    gc.enable()
+    labels = []
+
+    graph_net.eval()
+
+    for batch_idx, (patient_ID, graph_object) in enumerate(test_loader.dataset.items()):
+
+        data, label = graph_object
+
+        with torch.no_grad():
+            if use_gpu:
+                data, label = data.to(device), label.to(device)
+            else:
+                data, label = data, label
+
+        logits, Y_prob = graph_net(data)
+        Y_hat = Y_prob.argmax(dim=1)
+
+        test_acc += torch.sum(Y_hat == label.data)
+        test_count += 1
+
+        loss = loss_fn(logits, label)
+        test_loss += loss.item()
+
+        labels.append(label.item())
+
+        del data, logits, Y_prob, Y_hat
+        gc.collect()
+    return labels
+
+# Define collate function
+def collate_fn_none(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    return torch.utils.data.dataloader.default_collate(batch)
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
+    
 # Inference with MIL to get CLASS
+def inference_mil(patches_csv):
+    # Image transforms
+    train_transform = transforms.Compose([
+            transforms.RandomChoice([
+            transforms.ColorJitter(brightness=0.1),
+            transforms.ColorJitter(contrast=0.1),
+            transforms.ColorJitter(saturation=0.1),
+            transforms.ColorJitter(hue=0.1)]),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+
+    test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+    
+    seed = 42
+    seed_everything(seed)
+    K= 5
+    num_workers = 4
+    batch_size = 10
+    label = 'label'
+    patient_id = 'Patient ID'
+    dataset_name = 'inference'
+    n_classes= 5
+
+    # Load the dataset
+    df = pd.read_csv(patches_csv, header=0)
+    df = df.dropna(subset=[label])
+
+    # create k-NNG with VGG patch embedddings
+    file_ids, train_ids, test_ids = Loaders().train_test_ids(df, 0, seed, patient_id, label, False)
+    train_subset, test_subset = Loaders().df_loader(df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False)
+    train_slides, test_slides = Loaders().slides_dataloader(train_subset, test_subset, train_ids, test_ids, train_transform, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
+    embedding_net = VGG_embedding(embedding_vector_size=1024, n_classes=n_classes)
+
+    if use_gpu:
+        embedding_net.to(device)
+    # Save k-NNG with VGG patch embedddings for future use
+    slides_dict = {('train_graph_dict_', 'train_embedding_dict_') : train_slides ,
+                    ('test_graph_dict_', 'test_embedding_dict_'): test_slides}
+    for file_prefix, slides in slides_dict.items():
+        graph_dict, embedding_dict = create_embeddings_graphs(embedding_net, slides, k=K, mode='connectivity', include_self=False)
+        print(f"Started saving {file_prefix[0]} to file")
+        with open(f"{file_prefix[0]}{dataset_name}.pkl", "wb") as file:
+            pickle.dump(graph_dict, file)  # encode dict into Pickle
+            print("Done writing graph dict into pickle file")
+        print(f"Started saving {file_prefix[1]} to file")
+        with open(f"{file_prefix[1]}{dataset_name}.pkl", "wb") as file:
+            pickle.dump(embedding_dict, file)  # encode dict into Pickle
+            print("Done writing embedding dict into pickle file")    
+        
+    with open(f"test_graph_dict_{dataset_name}.pkl", "rb") as test_file:
+        # Load the dictionary from the file
+        test_graph_dict = pickle.load(test_file)
+    
+    test_graph_loader = torch.utils.data.DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    graph_net = GAT_SAGPool(1024, heads=2, pooling_ratio=0.7)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Load the model
+    # unzip the checkpoint
+    with zipfile.ZipFile("./mil_checkpoint.zip", 'r') as zip_ref:
+        zip_ref.extractall(".")
+    graph_net.load_state_dict(torch.load("./mil_checkpoint.pth"), strict=True)
+
+    labels = test_graph_multi_wsi(graph_net, test_graph_loader, loss_fn, n_classes=n_classes)
+    return labels
+
+# take the labels list wicj contains the class number and return the most repeated class number
+def aggregate_prediction(labels):
+    return max(set(labels), key = labels.count)
+
+class_number_to_subtype = {4:"ALL", 1:"AML", 0:"CLL", 3:"CML", 2:"NORMAL"}
+
+def main():
+    parser = argparse.ArgumentParser(description="Multi-stain self-attention graph multiple instance learning for Whole Slide Image set classification at the patient level")
+
+    # Command line arguments
+    parser.add_argument("--data", type=str, default="./data", help="Dataset Path")
+    args = parser.parse_args()
+
+    # Normalize the images
+    normalization(args.data)
+    # Resize the images
+    resize_images('./color_normalized/', './resized/')
+    # Create the masks
+    create_mask('./resized/', './masks/')
+    # Post-process the masks
+    post_processing('./masks/', './processed_masks/')
+    # Create the patches
+    create_patches('./resized/', './processed_masks/', './patches/')
+    # Create the CSV
+    create_csv('./patches/', 'patch_test.csv')
+    # Inference with MIL to get CLASS
+    label = inference_mil('patch_test.csv')
+    # Aggregate the predictions
+    class_number = aggregate_prediction(label)
+    subtype = class_number_to_subtype[class_number]
+    print(f"The predicted class is: {subtype}")
+
+main()
