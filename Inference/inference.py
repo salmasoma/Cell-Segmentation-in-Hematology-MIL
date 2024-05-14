@@ -123,5 +123,9 @@ def create_mask(output_dir, save_folder):
                 os.makedirs(save_folder)
             mask_img.save(save_path)
 
+# Post-process the mask
 def post_processing():
-    
+
+# Create the patches 
+# Create DF for MIL
+# Inference with MIL to get CLASS
