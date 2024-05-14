@@ -59,7 +59,7 @@ def normalization(input_dir):
     # Walk through all the subdirectories in DIR
     for subdir, dirs, files in os.walk(input_dir):
         for filename in files:
-            if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            if filename.lower().endswith((".jpg", ".jpeg", ".png", ".tif")):
                 filepath = os.path.join(subdir, filename)
                 to_transform = cv2.cvtColor(cv2.imread(os.path.join(filepath)), cv2.COLOR_BGR2RGB)
                 t_to_transform = T(to_transform)
