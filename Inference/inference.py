@@ -25,6 +25,7 @@ import torch.optim as optim
 import zipfile
 import gc
 import argparse
+from torchvision.models.segmentation import deeplabv3_resnet50
 
 # Transform for the inference dataset
 infer_transforms = A.Compose(
@@ -35,7 +36,7 @@ infer_transforms = A.Compose(
     ],
 )
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 use_gpu = torch.cuda.is_available()
 
 # Preprocessing 
@@ -78,7 +79,7 @@ def resize_images(output_normalized_dir, resized_dir, size=(448, 448)):
     for subdir, dirs, files in os.walk(output_normalized_dir):
         for filename in files:
             # Check for image file extensions
-            if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            if filename.lower().endswith((".jpg", ".jpeg", ".png", ".tif")):
                 # Construct the full file path
                 filepath = os.path.join(subdir, filename)
                 # Read the image
@@ -92,133 +93,164 @@ def resize_images(output_normalized_dir, resized_dir, size=(448, 448)):
                 # Save the image
                 cv2.imwrite(os.path.join(out_path, filename), resized_image)
 
-class InferenceDataset(Dataset):
-    def __init__(self, image_dir, transform=None):
-        self.image_dir = image_dir
-        self.transform = transform
-        self.images = [os.path.join(image_dir, img) for img in os.listdir(image_dir) if img.endswith(".png")]
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, index):
-        img_path = self.images[index]
-        image = np.array(Image.open(img_path).convert("RGB"))
-        if self.transform is not None:
-            augmented = self.transform(image=image)
-            image = augmented['image']
-        return image, img_path
-
-
 def create_mask(resized_dir, masks_dir):
-    model = torch.hub.load('pytorch/vision:v0.8.0', 'deeplabv3_resnet50', pretrained=True)
-    model.classifier[4] = torch.nn.Conv2d(256, 1, kernel_size=(1, 1), stride=(1, 1))
-    # If you are working with an auxiliary classifier, you should also adjust it
+    # Ensure the masks directory exists
+    if not os.path.exists(masks_dir):
+        os.makedirs(masks_dir)
+
+    # Load model and modify the final layers
+    model = deeplabv3_resnet50(pretrained=False)
+
+    # Modify the last convolutional layer
+    model.classifier[4] = nn.Conv2d(in_channels=256, out_channels=1, kernel_size=(1, 1))
+
+    # If there's an auxiliary classifier, modify it similarly
     if model.aux_classifier is not None:
-        model.aux_classifier[4] = torch.nn.Conv2d(256, 1, kernel_size=(1, 1), stride=(1, 1))
-    checkpoint = torch.load("my_checkpoint_448.pth.tar")
-    model.load_state_dict(checkpoint["state_dict"])
+        model.aux_classifier[4] = nn.Conv2d(in_channels=256, out_channels=1, kernel_size=(1, 1))
 
-    # Instantiate the inference dataset and dataloader
-    infer_dataset = InferenceDataset(image_dir=resized_dir, transform=infer_transforms)
-    infer_loader = DataLoader(infer_dataset, batch_size=1, shuffle=False)
-
+    # Load the trained model weights
+    checkpoint_path = './deeplabv3_leukemia.pth'
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Remove keys related to aux_classifier
+    aux_keys = [key for key in checkpoint.keys() if "aux_classifier" in key]
+    for key in aux_keys:
+        del checkpoint[key]
+    model.load_state_dict(checkpoint, strict=False)
+    model.to(device)
     model.eval()
-    for idx, (x, img_path) in enumerate(infer_loader):
-        x = x.to(device=device)
-        with torch.no_grad():
-            preds = torch.sigmoid(model(x)['out'])
-            preds = (preds > 0.5).float()
-        preds = preds.cpu().numpy()
-        for i in range(len(preds)):
-            # We have batch size of 1, so we access 0-th dimension which gives us the predicted mask
-            mask = preds[i].squeeze()
-            mask_img = Image.fromarray((mask * 255).astype(np.uint8))
-            save_path = os.path.join(masks_dir, os.path.basename(img_path[i]).replace(".png", "_mask.png"))
-            #check if the path exists
-            if not os.path.exists(masks_dir):
-                os.makedirs(masks_dir)
-            mask_img.save(save_path)
+
+    # Transformation for the input images
+    resize = 448
+    transform = A.Compose(
+        [
+            A.Resize(height=resize, width=resize),
+            A.Normalize(
+                mean=[0.0, 0.0, 0.0],
+                std=[1.0, 1.0, 1.0],
+                max_pixel_value=255.0,
+            ),
+            ToTensorV2(),
+        ])
+
+    # Traverse the subdirectories to find image files
+    for root, _, files in os.walk(resized_dir):
+        for filename in files:
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif')):
+                img_path = os.path.join(root, filename)
+
+                try:
+                    image = Image.open(img_path).convert("RGB")
+                    image = np.array(image)
+                except Exception as e:
+                    continue
+
+                augmented = transform(image=image)
+                input_tensor = augmented["image"].unsqueeze(0).to(device)
+
+                try:
+                    output = model(input_tensor)['out']
+                    predicted_mask = torch.sigmoid(output).squeeze().detach().cpu().numpy()
+
+                    # Convert the predicted mask to binary mask
+                    binary_mask = (predicted_mask > 0.5).astype(np.uint8) * 255
+
+                    # Create the corresponding subdirectory in masks_dir
+                    relative_path = os.path.relpath(root, resized_dir)
+                    mask_subdir = os.path.join(masks_dir, relative_path)
+                    os.makedirs(mask_subdir, exist_ok=True)
+
+                    # Save the predicted mask
+                    mask_save_path = os.path.join(mask_subdir, filename)
+                    mask_image = Image.fromarray(binary_mask)
+                    mask_image.save(mask_save_path)
+                except Exception as e:
+                    continue
 
 
 def get_processed_mask(image_path, output_path):
-    # Load the image
     image = cv2.imread(image_path)
-    
-    # Convert to grayscale
     gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Threshold the image: all non-black pixels will be set to white (255)
     _, binary_image = cv2.threshold(gray_image, 1, 255, cv2.THRESH_BINARY)
-
-    # Fill holes using morphological closing operation
     kernel = np.ones((5, 5), np.uint8)  # Adjust kernel size if necessary
     closed_image = cv2.morphologyEx(binary_image, cv2.MORPH_CLOSE, kernel)
-    #smoothen the edges
-    closed_image = cv2.GaussianBlur(closed_image, (0,0), sigmaX=3, sigmaY=3, borderType = cv2.BORDER_DEFAULT)
+    # Smoothen the edges
+    closed_image = cv2.GaussianBlur(closed_image, (0, 0), sigmaX=3, sigmaY=3, borderType=cv2.BORDER_DEFAULT)
 
     # Save the processed image
     cv2.imwrite(output_path, closed_image)
 
-# Post-process the mask
+
+
 def post_processing(masks_dir, processed_masks_dir):
+    # Ensure the processed masks directory exists
+    if not os.path.exists(processed_masks_dir):
+        os.makedirs(processed_masks_dir)
+    
     # Traverse the source directory and process each image
     for subdir, dirs, files in os.walk(masks_dir):
         for file in files:
-            filepath = os.path.join(subdir, file)
-            if filepath.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                filepath = os.path.join(subdir, file)
                 # Construct the output path
                 relative_path = os.path.relpath(subdir, masks_dir)
                 output_dir = os.path.join(processed_masks_dir, relative_path)
                 os.makedirs(output_dir, exist_ok=True)
                 output_path = os.path.join(output_dir, file)
-                
                 # Process the image
                 get_processed_mask(filepath, output_path)
     
 
-# Create the patches 
 def create_patches(resized_dir, processed_masks_dir, patches_dir):
     # Iterate over the images in the image directory
-    for filename in os.listdir(resized_dir):
-        if any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.tif', '.tiff']):
-            base_name = os.path.splitext(filename)[0]
-            mask_filename = f"{base_name}.png" if base_name.endswith('_mask') else f"{base_name}_mask.png"
-            image_path = os.path.join(resized_dir, filename)
-            mask_path = os.path.join(processed_masks_dir, mask_filename)
+    for root, _, files in os.walk(resized_dir):
+        for filename in files:
+            if any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.tif', '.tiff']):
+                base_name = os.path.splitext(filename)[0]
+                mask_filename = f"{base_name}.png"  # Adjusted to match the new naming convention
+                image_path = os.path.join(root, filename)
+                mask_path = os.path.join(processed_masks_dir, os.path.relpath(root, resized_dir), mask_filename)
 
-            # Load the original image and mask
-            original_image = cv2.imread(image_path)
-            mask_image = cv2.imread(mask_path, 0)
+                # Load the original image and mask
+                original_image = cv2.imread(image_path)
+                mask_image = cv2.imread(mask_path, 0)
 
-            # Resize the original image and mask to 448x448
-            original_image_resized = cv2.resize(original_image, (448, 448))
-
-            # Optional: Adjust mask processing here, e.g., apply threshold
-            _, mask_image = cv2.threshold(mask_image, 127, 255, cv2.THRESH_BINARY)
-
-            # Find contours in the mask image
-            contours, _ = cv2.findContours(mask_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            cell_count = 0  # Initialize cell count
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                if area < 100:  # Ignore contours with area less than 100 pixels
+                # Check if the mask image exists
+                if mask_image is None:
+                    print(f"Warning: Mask not found for {image_path}, skipping.")
                     continue
 
-                x, y, w, h = cv2.boundingRect(contour)
-                cropped_img = original_image_resized[y:y+h, x:x+w]
+                # Resize the original image and mask to 448x448
+                original_image_resized = cv2.resize(original_image, (448, 448))
 
-                # Resize the cell to 232x232 without padding
-                resized_img = cv2.resize(cropped_img, (100, 100))
-                pil_img = Image.fromarray(cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB))
+                # Optional: Adjust mask processing here, e.g., apply threshold
+                _, mask_image = cv2.threshold(mask_image, 127, 255, cv2.THRESH_BINARY)
 
-                # Save each cell with a unique filename
-                cell_count += 1
-                cell_filename = f"{os.path.splitext(filename)[0]}_{cell_count}.png"
-                os.makedirs(patches_dir, exist_ok=True)
-                cell_output_path = os.path.join(patches_dir, cell_filename)
-                pil_img.save(cell_output_path)
+                # Find contours in the mask image
+                contours, _ = cv2.findContours(mask_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                cell_count = 0  # Initialize cell count
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if area < 100:  # Ignore contours with area less than 100 pixels
+                        continue
+
+                    x, y, w, h = cv2.boundingRect(contour)
+                    cropped_img = original_image_resized[y:y+h, x:x+w]
+
+                    # Resize the cell to 100x100 without padding
+                    resized_img = cv2.resize(cropped_img, (100, 100))
+                    pil_img = Image.fromarray(cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB))
+
+                    # Save each cell with a unique filename
+                    cell_count += 1
+                    relative_path = os.path.relpath(root, resized_dir)
+                    cell_output_dir = os.path.join(patches_dir, relative_path)
+                    os.makedirs(cell_output_dir, exist_ok=True)
+                    cell_filename = f"{base_name}_{cell_count}.png"
+                    cell_output_path = os.path.join(cell_output_dir, cell_filename)
+                    pil_img.save(cell_output_path)
+
 
 # Create DF for MIL
 def create_csv(patches_dir, patches_csv='patch_test.csv'):
@@ -230,7 +262,7 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
     with open(patches_csv, 'w', newline='') as file:
         writer = csv.writer(file)
         # Write the headers
-        writer.writerow(['Filename', 'Location', 'Subtype', 'Patient ID', 'label'])
+        writer.writerow(['Filename', 'Location', 'Subtype', 'Patient ID', 'label', 'train/test'])
         
         # Walk through all files in the directory
         for dirpath, _, filenames in os.walk(patches_dir):
@@ -247,11 +279,13 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
                         label_encodings[subtype] = current_label
                         current_label += 1
                     label = label_encodings[subtype]
+                    # Randomly assign train or test (for demonstration, use a better method for real cases)
+                    train_test = 'train' if random.random() > 0.2 else 'test'
                     # Write data to CSV
-                    writer.writerow([filename, location, subtype, patient_id, label])
+                    writer.writerow([filename, location, subtype, patient_id, label, train_test])
+
 
 class Loaders:
-
     def train_test_ids(self, df, train_fraction, random_state, patient_id, label, subset=False, split_column='train/test'):
         """
         Splits the IDs based on 'train' or 'test' values in a specified column of the dataframe.
@@ -586,9 +620,9 @@ def inference_mil(patches_csv):
 
     # Load the model
     # unzip the checkpoint
-    with zipfile.ZipFile("./mil_checkpoint.zip", 'r') as zip_ref:
-        zip_ref.extractall(".")
-    graph_net.load_state_dict(torch.load("./mil_checkpoint.pth"), strict=True)
+    # with zipfile.ZipFile("./mil_checkpoint.zip", 'r') as zip_ref:
+    #     zip_ref.extractall(".")
+    graph_net.load_state_dict(torch.load("./mil_checkpoint.zip"), strict=True)
 
     labels = test_graph_multi_wsi(graph_net, test_graph_loader, loss_fn, n_classes=n_classes)
     return labels
