@@ -26,7 +26,9 @@ import zipfile
 import gc
 import argparse
 from torchvision.models.segmentation import deeplabv3_resnet50
-
+import warnings
+warnings.filterwarnings("ignore")
+import shutil
 # Transform for the inference dataset
 infer_transforms = A.Compose(
     [
@@ -274,34 +276,43 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
                     location = os.path.join(dirpath, filename)
                     # Remove extension and '_overlayed' from filename to get Patient ID
                     patient_id = re.sub(r'_(\d+)(\.[\w\d]+)$', '', filename)  # Use regex to remove last underscore followed by a number and extension
+                    # set constant PID
+                    patient_id = "P1"
                     # Get or create label encoding for the subtype
                     if subtype not in label_encodings:
                         label_encodings[subtype] = current_label
                         current_label += 1
                     label = label_encodings[subtype]
-                    # Randomly assign train or test (for demonstration, use a better method for real cases)
-                    train_test = 'train' if random.random() > 0.2 else 'test'
+                    subtype = "ALL"
+                    train_test = 'test'
                     # Write data to CSV
                     writer.writerow([filename, location, subtype, patient_id, label, train_test])
 
+class CustomDataset(Dataset):
+    def __init__(self, df, transform=None):
+        self.df = df
+        self.transform = transform
 
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+        sample = self.df.iloc[idx]
+
+        image_path = sample['Location']
+        label = sample['label']
+        image = Image.open(image_path).convert('RGB')
+
+        if self.transform:
+            image = self.transform(image=np.array(image))['image']
+
+        return image, torch.tensor(label)
+
+# Modify the df_loader method in Loaders class
 class Loaders:
     def train_test_ids(self, df, train_fraction, random_state, patient_id, label, subset=False, split_column='train/test'):
-        """
-        Splits the IDs based on 'train' or 'test' values in a specified column of the dataframe.
-
-        Args:
-            df (pd.DataFrame): The DataFrame containing the data.
-            train_fraction (float): The fraction of data to be used for training (not used here but retained for compatibility).
-            random_state (int): The random state for reproducibility (not used here but retained for compatibility).
-            patient_id (str): The column name containing patient IDs.
-            label (str): The column name containing labels (not used here but retained for compatibility).
-            subset (bool): Whether to create a subset for smaller experimental runs.
-            split_column (str): The column name to decide train/test split.
-
-        Returns:
-            tuple: A tuple containing full file IDs, train IDs, and test IDs.
-        """
         train_ids = df[df[split_column] == 'train'][patient_id].unique().tolist()
         test_ids = df[df[split_column] == 'test'][patient_id].unique().tolist()
         file_ids = sorted(set(train_ids + test_ids))
@@ -312,64 +323,60 @@ class Loaders:
             return file_ids, train_subset_ids, test_subset_ids
     
         return file_ids, train_ids, test_ids
-
     def df_loader(self, df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False):
-        """
-        Loads the training and testing DataFrame subsets based on patient IDs.
+        test_subset = df.reset_index(drop=True)
+        return test_subset
 
-        Args:
-            df (pd.DataFrame): The full DataFrame.
-            train_transform (callable): Transformations to apply to the training data.
-            test_transform (callable): Transformations to apply to the testing data.
-            train_ids (list): List of patient IDs for training.
-            test_ids (list): List of patient IDs for testing.
-            patient_id (str): The column name containing patient IDs.
-            label (str): The label column name.
-            subset (bool): If True, use only a subset of data (not used here but retained for compatibility).
-
-        Returns:
-            tuple: Training and testing DataFrame subsets.
-        """
-        train_subset = df[df[patient_id].isin(train_ids)].reset_index(drop=True)
-        test_subset = df[df[patient_id].isin(test_ids)].reset_index(drop=True)
-        return train_subset, test_subset
-
-    def slides_dataloader(self, train_sub, test_sub, train_ids, test_ids, train_transform, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
-        """
-        Creates data loaders for the training and testing subsets.
-
-        Args:
-            train_sub (pd.DataFrame): Training subset DataFrame.
-            test_sub (pd.DataFrame): Testing subset DataFrame.
-            train_ids (list): List of patient IDs for training data loaders.
-            test_ids (list): List of patient IDs for testing data loaders.
-            train_transform (callable): Transformations for the training data.
-            test_transform (callable): Transformations for the testing data.
-            slide_batch (int): Batch size for the data loaders.
-            num_workers (int): Number of workers for data loading.
-            shuffle (bool): Whether to shuffle the data loaders.
-            collate (callable): Collate function for the data loaders.
-            label (str): Label column name.
-            patient_id (str): Patient ID column name.
-
-        Returns:
-            tuple: Dictionaries of data loaders for training and testing subsets.
-        """
-        # TRAIN dict
-        train_subsets = {}
-        for file in train_ids:
-            new_key = f'{file}'
-            train_subset = train_sub[train_sub[patient_id] == file]
-            train_subsets[new_key] = torch.utils.data.DataLoader(train_subset, batch_size=slide_batch, shuffle=shuffle, num_workers=num_workers, drop_last=False, collate_fn=collate)
-
+    def slides_dataloader(self, test_sub, train_ids, test_ids, train_transform, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
         # TEST dict
         test_subsets = {}
         for file in test_ids:
             new_key = f'{file}'
             test_subset = test_sub[test_sub[patient_id] == file]
-            test_subsets[new_key] = torch.utils.data.DataLoader(test_subset, batch_size=slide_batch, shuffle=False, num_workers=num_workers, drop_last=False, collate_fn=collate)
+            test_subsets[new_key] = DataLoader(CustomDataset(test_subset, transform=test_transform), batch_size=slide_batch, shuffle=False, num_workers=num_workers, collate_fn=collate)
+        return test_subsets
 
-        return train_subsets, test_subsets
+def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
+    graph_dict = dict()
+    embedding_dict = dict()
+
+    embedding_net.eval()
+    with torch.no_grad():
+        for patient_ID, slide_loader in loader.items():
+            patient_embedding = []
+            for patch in slide_loader:
+                try:
+                    inputs, label = patch
+                    label = label[0].unsqueeze(0)
+
+                    if use_gpu:
+                        inputs, label = inputs.to(device), label.to(device)
+                    else:
+                        inputs, label = inputs, label
+
+                    embedding = embedding_net(inputs)
+                    embedding = embedding.to('cpu')
+                    embedding = embedding.squeeze(0).squeeze(0)
+                    patient_embedding.append(embedding)
+                except KeyError as e:
+                    print(f"KeyError: {e}")
+                    continue
+
+            try:
+                patient_embedding = torch.cat(patient_embedding)
+            except RuntimeError:
+                continue
+            
+            embedding_dict[patient_ID] = [patient_embedding.to('cpu'), label.to('cpu')]
+
+            knn_graph = kneighbors_graph(patient_embedding.reshape(-1, 1), k, mode=mode, include_self=include_self)
+            edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
+            data = Data(x=patient_embedding, edge_index=edge_index)
+        
+            graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
+
+    return graph_dict, embedding_dict
+
 
 class VGG_embedding(nn.Module):
 
@@ -405,45 +412,6 @@ class VGG_embedding(nn.Module):
         output = output.view(output.size()[0], -1)
         return output
 
-def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
-
-    graph_dict = dict()
-    embedding_dict = dict()
-
-    embedding_net.eval()
-    with torch.no_grad():
-
-        for patient_ID, slide_loader in loader.items():
-            patient_embedding = []
-    
-            for patch in slide_loader:
-                inputs, label = patch
-                label = label[0].unsqueeze(0)
-                
-                if use_gpu:
-                    inputs, label = inputs.to(device), label.to(device)
-                else:
-                    inputs, label = inputs, label
-    
-                embedding = embedding_net(inputs)
-                embedding = embedding.to('cpu')
-                embedding = embedding.squeeze(0).squeeze(0)
-                patient_embedding.append(embedding)
-    
-            try:
-                patient_embedding = torch.cat(patient_embedding)
-            except RuntimeError:
-                continue
-            
-            embedding_dict[patient_ID] = [patient_embedding.to('cpu'), label.to('cpu')]
-
-            knn_graph = kneighbors_graph(patient_embedding.reshape(-1, 1), k, mode=mode, include_self=include_self)
-            edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
-            data = Data(x=patient_embedding, edge_index=edge_index)
-        
-            graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
-    
-    return graph_dict, embedding_dict
 
 class GAT_SAGPool(torch.nn.Module):
 
@@ -510,7 +478,8 @@ class GAT_SAGPool(torch.nn.Module):
 
         return x_logits, x_out
 
-def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=2):
+
+def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
     gc.enable()
     labels = []
 
@@ -540,6 +509,7 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=2):
         del data, logits, Y_prob, Y_hat
         gc.collect()
     return labels
+    
 
 # Define collate function
 def collate_fn_none(batch):
@@ -557,75 +527,62 @@ def seed_everything(seed=42):
     
 # Inference with MIL to get CLASS
 def inference_mil(patches_csv):
-    # Image transforms
-    train_transform = transforms.Compose([
-            transforms.RandomChoice([
-            transforms.ColorJitter(brightness=0.1),
-            transforms.ColorJitter(contrast=0.1),
-            transforms.ColorJitter(saturation=0.1),
-            transforms.ColorJitter(hue=0.1)]),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
+    train_transform = A.Compose([
+        A.OneOf([
+            A.ColorJitter(brightness=0.1),
+            A.ColorJitter(contrast=0.1),
+            A.ColorJitter(saturation=0.1),
+            A.ColorJitter(hue=0.1)], p=1.0),
+        A.HorizontalFlip(),
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ToTensorV2()
+    ])
 
-    test_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
+    test_transform = A.Compose([
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ToTensorV2()
+    ])
     
     seed = 42
     seed_everything(seed)
-    K= 5
+    K = 5
     num_workers = 4
     batch_size = 10
     label = 'label'
     patient_id = 'Patient ID'
     dataset_name = 'inference'
-    n_classes= 5
+    n_classes = 5
 
-    # Load the dataset
     df = pd.read_csv(patches_csv, header=0)
     df = df.dropna(subset=[label])
 
-    # create k-NNG with VGG patch embedddings
-    file_ids, train_ids, test_ids = Loaders().train_test_ids(df, 0, seed, patient_id, label, False)
-    train_subset, test_subset = Loaders().df_loader(df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False)
-    train_slides, test_slides = Loaders().slides_dataloader(train_subset, test_subset, train_ids, test_ids, train_transform, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
+    loaders = Loaders()
+    file_ids, train_ids, test_ids = loaders.train_test_ids(df, 0, seed, patient_id, label, False)
+    test_subset = loaders.df_loader(df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False)
+    test_slides = loaders.slides_dataloader(test_subset, train_ids, test_ids, train_transform, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
     embedding_net = VGG_embedding(embedding_vector_size=1024, n_classes=n_classes)
-
     if use_gpu:
         embedding_net.to(device)
-    # Save k-NNG with VGG patch embedddings for future use
-    slides_dict = {('train_graph_dict_', 'train_embedding_dict_') : train_slides ,
-                    ('test_graph_dict_', 'test_embedding_dict_'): test_slides}
+
+    slides_dict = {('test_graph_dict_', 'test_embedding_dict_'): test_slides}
     for file_prefix, slides in slides_dict.items():
         graph_dict, embedding_dict = create_embeddings_graphs(embedding_net, slides, k=K, mode='connectivity', include_self=False)
-        print(f"Started saving {file_prefix[0]} to file")
         with open(f"{file_prefix[0]}{dataset_name}.pkl", "wb") as file:
-            pickle.dump(graph_dict, file)  # encode dict into Pickle
-            print("Done writing graph dict into pickle file")
-        print(f"Started saving {file_prefix[1]} to file")
+            pickle.dump(graph_dict, file)
         with open(f"{file_prefix[1]}{dataset_name}.pkl", "wb") as file:
-            pickle.dump(embedding_dict, file)  # encode dict into Pickle
-            print("Done writing embedding dict into pickle file")    
-        
+            pickle.dump(embedding_dict, file)
+
     with open(f"test_graph_dict_{dataset_name}.pkl", "rb") as test_file:
-        # Load the dictionary from the file
         test_graph_dict = pickle.load(test_file)
-    
-    test_graph_loader = torch.utils.data.DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+
+    test_graph_loader = DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     graph_net = GAT_SAGPool(1024, heads=2, pooling_ratio=0.7)
     loss_fn = nn.CrossEntropyLoss()
-
-    # Load the model
-    # unzip the checkpoint
-    # with zipfile.ZipFile("./mil_checkpoint.zip", 'r') as zip_ref:
-    #     zip_ref.extractall(".")
-    graph_net.load_state_dict(torch.load("./mil_checkpoint.zip"), strict=True)
+    graph_net.load_state_dict(torch.load("./MIL.pth"), strict=True)
 
     labels = test_graph_multi_wsi(graph_net, test_graph_loader, loss_fn, n_classes=n_classes)
     return labels
+
 
 # take the labels list wicj contains the class number and return the most repeated class number
 def aggregate_prediction(labels):
@@ -659,4 +616,5 @@ def main():
     subtype = class_number_to_subtype[class_number]
     print(f"The predicted class is: {subtype}")
 
-main()
+if __name__ == "__main__":
+    main()
