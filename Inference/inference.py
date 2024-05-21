@@ -250,7 +250,7 @@ def create_patches(resized_dir, processed_masks_dir, patches_dir):
                     relative_path = os.path.relpath(root, resized_dir)
                     cell_output_dir = os.path.join(patches_dir, relative_path)
                     os.makedirs(cell_output_dir, exist_ok=True)
-                    cell_filename = f"{base_name}_{cell_count}.png"
+                    cell_filename = f"{base_name}.{cell_count}.png"
                     cell_output_path = os.path.join(cell_output_dir, cell_filename)
                     pil_img.save(cell_output_path)
 
@@ -280,7 +280,7 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
                 patient_id = re.sub(r'_(\d+)(\.[\w\d]+)$', '', filename)  # Use regex to remove last underscore followed by a number and extension
                 # Set constant PID
                 # Make patient ID be everything before '_'
-                patient_id = patient_id.split('_')[1]
+                patient_id = patient_id.split('.')[0]
                 # patient_id = "P1"
                 # Get or create label encoding for the subtype
                 if subtype not in label_encodings:
