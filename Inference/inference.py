@@ -278,13 +278,13 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
                     # Remove extension and '_overlayed' from filename to get Patient ID
                     patient_id = re.sub(r'_(\d+)(\.[\w\d]+)$', '', filename)  # Use regex to remove last underscore followed by a number and extension
                     # set constant PID
-                    patient_id = "P1"
+                    patient_id = filename.lower().split('_')[0]
                     # Get or create label encoding for the subtype
                     if subtype not in label_encodings:
                         label_encodings[subtype] = current_label
                         current_label += 1
                     label = label_encodings[subtype]
-                    subtype = "ALL"
+                    subtype = "CLL"
                     train_test = 'test'
                     # Write data to CSV
                     writer.writerow([filename, location, subtype, patient_id, label, train_test])
@@ -344,47 +344,6 @@ def filter_invalid_edges(data):
         data.edge_index = data.edge_index[:, valid_mask]
         return data
 
-# def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
-#     graph_dict = dict()
-#     embedding_dict = dict()
-
-#     embedding_net.eval()
-#     with torch.no_grad():
-#         for patient_ID, slide_loader in loader.items():
-#             patient_embedding = []
-#             for patch in slide_loader:
-#                 try:
-#                     inputs, label = patch
-#                     label = label[0].unsqueeze(0)
-
-#                     if use_gpu:
-#                         inputs, label = inputs.to(device), label.to(device)
-#                     else:
-#                         inputs, label = inputs, label
-
-#                     embedding = embedding_net(inputs)
-#                     embedding = embedding.to('cpu')
-#                     embedding = embedding.squeeze(0).squeeze(0)
-#                     patient_embedding.append(embedding)
-#                 except KeyError as e:
-#                     print(f"KeyError: {e}")
-#                     continue
-
-#             try:
-#                 patient_embedding = torch.cat(patient_embedding)
-#             except RuntimeError:
-#                 continue
-            
-#             embedding_dict[patient_ID] = [patient_embedding.to('cpu'), label.to('cpu')]
-
-#             knn_graph = kneighbors_graph(patient_embedding.reshape(-1, 1), k, mode=mode, include_self=include_self)
-#             edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
-#             data = Data(x=patient_embedding, edge_index=edge_index)
-        
-#             graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
-
-#     return graph_dict, embedding_dict
-
 def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
     graph_dict = dict()
     embedding_dict = dict()
@@ -422,12 +381,53 @@ def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', in
             edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
             data = Data(x=patient_embedding, edge_index=edge_index)
         
-            # Here is where you should filter invalid edges
-            data = filter_invalid_edges(data)
-
             graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
 
     return graph_dict, embedding_dict
+
+# def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
+#     graph_dict = dict()
+#     embedding_dict = dict()
+
+#     embedding_net.eval()
+#     with torch.no_grad():
+#         for patient_ID, slide_loader in loader.items():
+#             patient_embedding = []
+#             for patch in slide_loader:
+#                 try:
+#                     inputs, label = patch
+#                     label = label[0].unsqueeze(0)
+
+#                     if use_gpu:
+#                         inputs, label = inputs.to(device), label.to(device)
+#                     else:
+#                         inputs, label = inputs, label
+
+#                     embedding = embedding_net(inputs)
+#                     embedding = embedding.to('cpu')
+#                     embedding = embedding.squeeze(0).squeeze(0)
+#                     patient_embedding.append(embedding)
+#                 except KeyError as e:
+#                     print(f"KeyError: {e}")
+#                     continue
+
+#             try:
+#                 patient_embedding = torch.cat(patient_embedding)
+#             except RuntimeError:
+#                 continue
+            
+#             embedding_dict[patient_ID] = [patient_embedding.to('cpu'), label.to('cpu')]
+
+#             knn_graph = kneighbors_graph(patient_embedding.reshape(-1, 1), k, mode=mode, include_self=include_self)
+#             edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
+#             data = Data(x=patient_embedding, edge_index=edge_index)
+        
+#             # Here is where you should filter invalid edges
+#             data = filter_invalid_edges(data)
+
+#             graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
+
+#     return graph_dict, embedding_dict
 
 class VGG_embedding(nn.Module):
 
@@ -539,6 +539,7 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
     for batch_idx, (patient_ID, graph_object) in enumerate(test_loader.dataset.items()):
 
         data, label = graph_object
+        data = filter_invalid_edges(data)
 
         with torch.no_grad():
             if use_gpu:
@@ -551,10 +552,11 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
 
         loss = loss_fn(logits, label)
 
-        labels.append(label.item())
+        labels.append(Y_hat.item())
 
         del data, logits, Y_prob, Y_hat
         gc.collect()
+
     return labels
     
 
@@ -658,11 +660,23 @@ def main():
     create_csv('./patches/', 'patch_test.csv')
     # Inference with MIL to get CLASS
     label = inference_mil('patch_test.csv')
-    # print(label)
+    print(label)
+
     # Aggregate the predictions
     class_number = aggregate_prediction(label)
     subtype = class_number_to_subtype[class_number]
     print(f"The predicted class is: {subtype}")
+
+    # Clean up the directories
+    shutil.rmtree('./color_normalized/')
+    shutil.rmtree('./resized/')
+    shutil.rmtree('./masks/')
+    shutil.rmtree('./processed_masks/')
+    shutil.rmtree('./patches/')
+    os.remove('patch_test.csv')
+    os.remove('test_graph_dict_inference.pkl')
+    os.remove('test_embedding_dict_inference.pkl')
+    
 
 if __name__ == "__main__":
     main()
