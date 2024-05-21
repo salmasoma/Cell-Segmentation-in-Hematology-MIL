@@ -281,6 +281,7 @@ def create_csv(patches_dir, patches_csv='patch_test.csv'):
                 # Set constant PID
                 # Make patient ID be everything before '_'
                 patient_id = patient_id.split('_')[1]
+                # patient_id = "P1"
                 # Get or create label encoding for the subtype
                 if subtype not in label_encodings:
                     label_encodings[subtype] = current_label
@@ -572,7 +573,7 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
 
         loss = loss_fn(logits, label)
 
-        labels.append(label.item())
+        labels.append(Y_hat.item())
 
         del data, logits, Y_prob, Y_hat
         gc.collect()
@@ -679,11 +680,21 @@ def main():
     create_csv('./patches/', 'patch_test.csv')
     # Inference with MIL to get CLASS
     label = inference_mil('patch_test.csv')
-    # print(label)
+    # print("All labels:", label)
     # Aggregate the predictions
     class_number = aggregate_prediction(label)
     subtype = class_number_to_subtype[class_number]
     print(f"The predicted class is: {subtype}")
+
+    # Clean up the directories
+    shutil.rmtree('./color_normalized/')
+    shutil.rmtree('./resized/')
+    shutil.rmtree('./masks/')
+    shutil.rmtree('./processed_masks/')
+    shutil.rmtree('./patches/')
+    os.remove('patch_test.csv')
+    os.remove('test_graph_dict_inference.pkl')
+    os.remove('test_embedding_dict_inference.pkl')
 
 if __name__ == "__main__":
     main()
