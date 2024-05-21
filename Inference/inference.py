@@ -622,7 +622,7 @@ def inference_mil(patches_csv):
     with open(f"test_graph_dict_{dataset_name}.pkl", "rb") as test_file:
         test_graph_dict = pickle.load(test_file)
 
-    test_graph_loader = DataLoader(test_gcraph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    test_graph_loader = DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     graph_net = GAT_SAGPool(1024, heads=2, pooling_ratio=0.7)
     loss_fn = nn.CrossEntropyLoss()
     graph_net.load_state_dict(torch.load("./mil_leukemia.pth"), strict=True)
