@@ -29,6 +29,7 @@ from torchvision.models.segmentation import deeplabv3_resnet50
 import warnings
 warnings.filterwarnings("ignore")
 import shutil
+
 # Transform for the inference dataset
 infer_transforms = A.Compose(
     [
@@ -336,6 +337,54 @@ class Loaders:
             test_subsets[new_key] = DataLoader(CustomDataset(test_subset, transform=test_transform), batch_size=slide_batch, shuffle=False, num_workers=num_workers, collate_fn=collate)
         return test_subsets
 
+def filter_invalid_edges(data):
+    num_nodes = data.x.size(0) 
+    valid_mask = (data.edge_index[0] < num_nodes) & (data.edge_index[1] < num_nodes)
+    if not valid_mask.all():
+        data.edge_index = data.edge_index[:, valid_mask]
+        return data
+
+# def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
+#     graph_dict = dict()
+#     embedding_dict = dict()
+
+#     embedding_net.eval()
+#     with torch.no_grad():
+#         for patient_ID, slide_loader in loader.items():
+#             patient_embedding = []
+#             for patch in slide_loader:
+#                 try:
+#                     inputs, label = patch
+#                     label = label[0].unsqueeze(0)
+
+#                     if use_gpu:
+#                         inputs, label = inputs.to(device), label.to(device)
+#                     else:
+#                         inputs, label = inputs, label
+
+#                     embedding = embedding_net(inputs)
+#                     embedding = embedding.to('cpu')
+#                     embedding = embedding.squeeze(0).squeeze(0)
+#                     patient_embedding.append(embedding)
+#                 except KeyError as e:
+#                     print(f"KeyError: {e}")
+#                     continue
+
+#             try:
+#                 patient_embedding = torch.cat(patient_embedding)
+#             except RuntimeError:
+#                 continue
+            
+#             embedding_dict[patient_ID] = [patient_embedding.to('cpu'), label.to('cpu')]
+
+#             knn_graph = kneighbors_graph(patient_embedding.reshape(-1, 1), k, mode=mode, include_self=include_self)
+#             edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
+#             data = Data(x=patient_embedding, edge_index=edge_index)
+        
+#             graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
+
+#     return graph_dict, embedding_dict
+
 def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', include_self=False):
     graph_dict = dict()
     embedding_dict = dict()
@@ -373,10 +422,12 @@ def create_embeddings_graphs(embedding_net, loader, k=5, mode='connectivity', in
             edge_index = torch.tensor(np.array(knn_graph.nonzero()), dtype=torch.long)
             data = Data(x=patient_embedding, edge_index=edge_index)
         
+            # Here is where you should filter invalid edges
+            data = filter_invalid_edges(data)
+
             graph_dict[patient_ID] = [data.to('cpu'), label.to('cpu')]
 
     return graph_dict, embedding_dict
-
 
 class VGG_embedding(nn.Module):
 
@@ -498,11 +549,7 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
         logits, Y_prob = graph_net(data)
         Y_hat = Y_prob.argmax(dim=1)
 
-        test_acc += torch.sum(Y_hat == label.data)
-        test_count += 1
-
         loss = loss_fn(logits, label)
-        test_loss += loss.item()
 
         labels.append(label.item())
 
@@ -575,16 +622,16 @@ def inference_mil(patches_csv):
     with open(f"test_graph_dict_{dataset_name}.pkl", "rb") as test_file:
         test_graph_dict = pickle.load(test_file)
 
-    test_graph_loader = DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
+    test_graph_loader = DataLoader(test_gcraph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     graph_net = GAT_SAGPool(1024, heads=2, pooling_ratio=0.7)
     loss_fn = nn.CrossEntropyLoss()
-    graph_net.load_state_dict(torch.load("./MIL.pth"), strict=True)
+    graph_net.load_state_dict(torch.load("./mil_leukemia.pth"), strict=True)
 
     labels = test_graph_multi_wsi(graph_net, test_graph_loader, loss_fn, n_classes=n_classes)
     return labels
 
 
-# take the labels list wicj contains the class number and return the most repeated class number
+# take the labels list which contains the class number and return the most repeated class number
 def aggregate_prediction(labels):
     return max(set(labels), key = labels.count)
 
@@ -611,6 +658,7 @@ def main():
     create_csv('./patches/', 'patch_test.csv')
     # Inference with MIL to get CLASS
     label = inference_mil('patch_test.csv')
+    # print(label)
     # Aggregate the predictions
     class_number = aggregate_prediction(label)
     subtype = class_number_to_subtype[class_number]
