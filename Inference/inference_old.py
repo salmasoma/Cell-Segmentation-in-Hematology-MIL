@@ -30,29 +30,73 @@ import warnings
 warnings.filterwarnings("ignore")
 import shutil
 
+# Transform for the inference dataset
+infer_transforms = A.Compose(
+    [
+        A.Resize(height=448, width=448),
+        A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0], max_pixel_value=255.0),
+        ToTensorV2(),
+    ],
+)
 
 device = torch.device("cpu")
 use_gpu = torch.cuda.is_available()
 
-transform = A.Compose(
-    [
-        A.(max_siLongestMaxSizeze=resize),
-        A.PadIfNeeded(
-            min_height=448, 
-            min_width=448, 
-            border_mode=cv2.BORDER_CONSTANT,
-            value=[0, 0, 0]  # Padding with black color for RGB images
-        ),
-        A.Normalize(
-            mean=[0.0, 0.0, 0.0],
-            std=[1.0, 1.0, 1.0],
-            max_pixel_value=255.0,
-        ),
-        ToTensorV2(),
-    ]
-)
+# Preprocessing 
+def normalization(input_dir):
+    output_normalized_dir = './color_normalized/'
 
-def create_mask(image_dir, masks_dir):
+    #if OUT directory does not exist, create it
+    if not os.path.exists(output_normalized_dir):
+        os.makedirs(output_normalized_dir)
+
+    target = cv2.cvtColor(cv2.imread("./Image_4184.png"), cv2.COLOR_BGR2RGB)
+
+    T = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Lambda(lambda x: x*255)
+    ])
+
+    normalizer = torchstain.normalizers.MacenkoNormalizer(backend='torch')
+    normalizer.fit(T(target))
+
+    # Walk through all the subdirectories in DIR
+    for subdir, dirs, files in os.walk(input_dir):
+        for filename in files:
+            if filename.lower().endswith((".jpg", ".jpeg", ".png", ".tif")):
+                filepath = os.path.join(subdir, filename)
+                to_transform = cv2.cvtColor(cv2.imread(os.path.join(filepath)), cv2.COLOR_BGR2RGB)
+                t_to_transform = T(to_transform)
+                norm, H, E = normalizer.normalize(I=t_to_transform, stains=True)
+                #save H image
+                H = np.array(H)
+                E = np.array(E)
+                norm = np.array(norm)
+                file_noext = os.path.splitext(filename)[0]
+                s = os.path.relpath(subdir, input_dir)
+                out_path = os.path.join(output_normalized_dir, s)
+                os.makedirs(out_path, exist_ok=True)  # Create output subdir if not exists
+                cv2.imwrite(os.path.join(out_path, file_noext) + ".png", norm)
+
+def resize_images(output_normalized_dir, resized_dir, size=(448, 448)):
+    for subdir, dirs, files in os.walk(output_normalized_dir):
+        for filename in files:
+            # Check for image file extensions
+            if filename.lower().endswith((".jpg", ".jpeg", ".png", ".tif")):
+                # Construct the full file path
+                filepath = os.path.join(subdir, filename)
+                # Read the image
+                image = cv2.imread(filepath)
+                # Resize the image
+                resized_image = cv2.resize(image, size)
+                # Construct the output path, maintaining the directory structure
+                out_path = os.path.join(resized_dir, os.path.relpath(subdir, output_normalized_dir))
+                # Make sure the directory exists
+                os.makedirs(out_path, exist_ok=True)
+                # Save the image
+                cv2.imwrite(os.path.join(out_path, filename), resized_image)
+
+def create_mask(resized_dir, masks_dir):
     # Ensure the masks directory exists
     if not os.path.exists(masks_dir):
         os.makedirs(masks_dir)
