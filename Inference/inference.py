@@ -39,12 +39,12 @@ from torchvision import transforms
 import torchstain
 
 
-device = torch.device("cpu")
+device = "cuda" if torch.cuda.is_available() else "cpu"
 use_gpu = torch.cuda.is_available()
 
 transform = A.Compose(
     [
-        A.LongestMaxSize(max_siLongestMaxSizeze=448),
+        A.LongestMaxSize(max_size=448),
         A.PadIfNeeded(
             min_height=448, 
             min_width=448, 
@@ -116,7 +116,7 @@ transforms.Lambda(lambda x: x*255)
 normalizer = torchstain.normalizers.ReinhardNormalizer(backend='torch')
 normalizer.fit(T(target))
     
-    # Preprocessing
+# Preprocessing
 def normalization(img):
     to_transform = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     t_to_transform = T(to_transform)
@@ -499,7 +499,7 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
             else:
                 data, label = data, label
 
-        logits, Y_prob = graph_net(data)
+        logits, Y_prob = graph_net(data.to(device))
         Y_hat = Y_prob.argmax(dim=1)
 
         patient_ID = patient_ID.split('_')[0]
@@ -580,9 +580,9 @@ def inference_mil(patches_csv):
         test_graph_dict = pickle.load(test_file)
 
     test_graph_loader = DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
-    graph_net = GAT_SAGPool(1024, heads=2, pooling_ratio=0.7)
+    graph_net = GAT_SAGPool(1024, heads=5, pooling_ratio=0.7).to(device)
     loss_fn = nn.CrossEntropyLoss()
-    graph_net.load_state_dict(torch.load("./mil_leukemia.pth"), strict=True)
+    graph_net.load_state_dict(torch.load("./checkpoint_65.pth"), strict=True)
 
     labels = test_graph_multi_wsi(graph_net, test_graph_loader, loss_fn, n_classes=n_classes)
     return labels
@@ -612,7 +612,7 @@ def main():
     # Clean up the directories
     shutil.rmtree('./masks/')
     shutil.rmtree('./patches/')
-    # os.remove('patch_test.csv')
+    os.remove('patch_test.csv')
     os.remove('test_graph_dict_inference.pkl')
     os.remove('test_embedding_dict_inference.pkl')
 
