@@ -41,6 +41,9 @@ import torchstain
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 use_gpu = torch.cuda.is_available()
+torch.manual_seed(0)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(0)
 
 transform = A.Compose(
     [
@@ -76,7 +79,7 @@ def create_mask(image_dir, masks_dir):
         model.aux_classifier[4] = nn.Conv2d(in_channels=256, out_channels=1, kernel_size=(1, 1))
 
     # Load the trained model weights
-    checkpoint_path = './deeplabv3_leukemia_AR.pth'
+    checkpoint_path = './deeplabv3_leukemia.pth'
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     # Remove keys related to aux_classifier
@@ -264,6 +267,7 @@ def create_csv(directory, output_file='patch_test.csv', entry_type="test"):
 
     # Load CSV file
     df = pd.read_csv(output_file)
+    df = df.sort_values(by='Filename').reset_index(drop=True)
 
     # Add initial subgroup assignments
     patient_id = "P1"
@@ -510,6 +514,8 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
         del data, logits, Y_prob, Y_hat
         gc.collect()
 
+    for patient_ID, preds in patient_predictions.items():
+        print(f'Prediction Count: CLL: {preds.count(0)} AML: {preds.count(1)} NORMAL: {preds.count(2)} CML: {preds.count(3)} ALL: {preds.count(4)}')
     # Calculate the most common prediction for each patient during testing
     for patient_ID, preds in patient_predictions.items():
         return max(set(preds), key=preds.count)
