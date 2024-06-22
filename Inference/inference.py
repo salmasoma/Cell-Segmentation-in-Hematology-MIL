@@ -37,13 +37,23 @@ from PIL import Image
 import torch
 from torchvision import transforms
 import torchstain
+import torch.backends.cudnn as cudnn
+
+
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 use_gpu = torch.cuda.is_available()
-torch.manual_seed(0)
+torch.manual_seed(42)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(0)
+    torch.cuda.manual_seed_all(42)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+worker_seed = torch.initial_seed() % 2**32
+np.random.seed(worker_seed)
+random.seed(worker_seed)
 
 transform = A.Compose(
     [
@@ -79,7 +89,7 @@ def create_mask(image_dir, masks_dir):
         model.aux_classifier[4] = nn.Conv2d(in_channels=256, out_channels=1, kernel_size=(1, 1))
 
     # Load the trained model weights
-    checkpoint_path = './deeplabv3_leukemia.pth'
+    checkpoint_path = './deeplabv3_leukemia_AR.pth'
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     # Remove keys related to aux_classifier
@@ -320,11 +330,11 @@ class Loaders:
             return file_ids, train_subset_ids, test_subset_ids
     
         return file_ids, train_ids, test_ids
-    def df_loader(self, df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False):
+    def df_loader(self, df, test_transform, test_ids, patient_id, label, subset=False):
         test_subset = df.reset_index(drop=True)
         return test_subset
 
-    def slides_dataloader(self, test_sub, train_ids, test_ids, train_transform, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
+    def slides_dataloader(self, test_sub, test_ids, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
         # TEST dict
         test_subsets = {}
         for file in test_ids:
@@ -537,17 +547,6 @@ def seed_everything(seed=42):
     
 # Inference with MIL to get CLASS
 def inference_mil(patches_csv):
-    train_transform = A.Compose([
-        A.OneOf([
-            A.ColorJitter(brightness=0.1),
-            A.ColorJitter(contrast=0.1),
-            A.ColorJitter(saturation=0.1),
-            A.ColorJitter(hue=0.1)], p=1.0),
-        A.HorizontalFlip(),
-        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
-        ToTensorV2()
-    ])
-
     test_transform = A.Compose([
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
@@ -568,8 +567,8 @@ def inference_mil(patches_csv):
 
     loaders = Loaders()
     file_ids, train_ids, test_ids = loaders.train_test_ids(df, 0, seed, patient_id, label, False)
-    test_subset = loaders.df_loader(df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False)
-    test_slides = loaders.slides_dataloader(test_subset, train_ids, test_ids, train_transform, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
+    test_subset = loaders.df_loader(df, test_transform, test_ids, patient_id, label, subset=False)
+    test_slides = loaders.slides_dataloader(test_subset, test_ids, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
     embedding_net = VGG_embedding(embedding_vector_size=1024, n_classes=n_classes)
     if use_gpu:
         embedding_net.to(device)
