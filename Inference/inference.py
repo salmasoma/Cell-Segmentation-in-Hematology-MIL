@@ -37,23 +37,21 @@ from PIL import Image
 import torch
 from torchvision import transforms
 import torchstain
-import torch.backends.cudnn as cudnn
-
-
-
+import random
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
 use_gpu = torch.cuda.is_available()
 torch.manual_seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
 worker_seed = torch.initial_seed() % 2**32
 np.random.seed(worker_seed)
 random.seed(worker_seed)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 transform = A.Compose(
     [
@@ -89,7 +87,7 @@ def create_mask(image_dir, masks_dir):
         model.aux_classifier[4] = nn.Conv2d(in_channels=256, out_channels=1, kernel_size=(1, 1))
 
     # Load the trained model weights
-    checkpoint_path = './deeplabv3_leukemia_AR.pth'
+    checkpoint_path = '/l/users/dawlat.akaila/deeplabv3_leukemia_AR.pth'
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
     # Remove keys related to aux_classifier
@@ -223,36 +221,18 @@ from collections import defaultdict
 
 # Determine subgroups based on the given logic
 def determine_subgroup(count):
-    if count < 20:
+    if count <= 10:
         return [1] * count
-    elif 20 <= count < 200:
-        return [(i // 5) + 1 for i in range(count)]
-    elif 200 <= count < 500:
-        return [(i // 10) + 1 for i in range(count)]
     else:
-        return [(i // 20) + 1 for i in range(count)]
-    
-# Ensure each subgroup has at least 3 instances
-def consolidate_subgroups(df):
-    current_subgroup = None
-    current_count = 0
-    previous_subgroup = None
+        subgroups = [(i // 10) + 1 for i in range(count)]
+        # Handle the remainder
+        remainder = count % 10
+        if remainder != 0:
+            last_full_group = (count // 10) - 1
+            for i in range(remainder):
+                subgroups[-(i + 1)] = last_full_group + 1
+        return subgroups
 
-    for index, row in df.iterrows():
-        if current_subgroup is None:
-            current_subgroup = row['Patient ID_Subgroup']
-            current_count = 1
-        elif current_subgroup == row['Patient ID_Subgroup']:
-            current_count += 1
-        else:
-            if current_count < 3:
-                df.loc[df['Patient ID_Subgroup'] == current_subgroup, 'Patient ID_Subgroup'] = previous_subgroup
-            previous_subgroup = current_subgroup
-            current_subgroup = row['Patient ID_Subgroup']
-            current_count = 1
-    if current_count < 3 and previous_subgroup:
-        df.loc[df['Patient ID_Subgroup'] == current_subgroup, 'Patient ID_Subgroup'] = previous_subgroup
-    return df
 
 # Create DF for MIL
 def create_csv(directory, output_file='patch_test.csv', entry_type="test"):
@@ -284,9 +264,6 @@ def create_csv(directory, output_file='patch_test.csv', entry_type="test"):
     count = len(df)
     subgroup_numbers = determine_subgroup(count)
     df['Patient ID_Subgroup'] = [f"{patient_id}_{subgroup}" for subgroup in subgroup_numbers]
-
-    # Apply the consolidation function
-    df = consolidate_subgroups(df)
 
     #rename 'Patient ID' column
     df.rename(columns={'Patient ID': 'Patient ID_Original'}, inplace=True)
@@ -330,11 +307,11 @@ class Loaders:
             return file_ids, train_subset_ids, test_subset_ids
     
         return file_ids, train_ids, test_ids
-    def df_loader(self, df, test_transform, test_ids, patient_id, label, subset=False):
+    def df_loader(self, df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False):
         test_subset = df.reset_index(drop=True)
         return test_subset
 
-    def slides_dataloader(self, test_sub, test_ids, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
+    def slides_dataloader(self, test_sub, train_ids, test_ids, train_transform, test_transform, slide_batch, num_workers, shuffle, collate, label='Pathotype_binary', patient_id="Patient ID"):
         # TEST dict
         test_subsets = {}
         for file in test_ids:
@@ -528,8 +505,17 @@ def test_graph_multi_wsi(graph_net, test_loader, loss_fn, n_classes=5):
         print(f'Prediction Count: CLL: {preds.count(0)} AML: {preds.count(1)} NORMAL: {preds.count(2)} CML: {preds.count(3)} ALL: {preds.count(4)}')
     # Calculate the most common prediction for each patient during testing
     for patient_ID, preds in patient_predictions.items():
-        return max(set(preds), key=preds.count)
-    
+        CLL = preds.count(0)
+        AML = preds.count(1)
+        NORMAL = preds.count(2)
+        CML = preds.count(3)
+        ALL = preds.count(4)
+        
+        subtype_index = [4,1,0,3,2]
+        list_count = [ALL, AML, CLL, CML, NORMAL]
+        max_count = max(list_count)
+
+        return subtype_index[list_count.index(max_count)]    
 
 # Define collate function
 def collate_fn_none(batch):
@@ -547,6 +533,17 @@ def seed_everything(seed=42):
     
 # Inference with MIL to get CLASS
 def inference_mil(patches_csv):
+    train_transform = A.Compose([
+        A.OneOf([
+            A.ColorJitter(brightness=0.1),
+            A.ColorJitter(contrast=0.1),
+            A.ColorJitter(saturation=0.1),
+            A.ColorJitter(hue=0.1)], p=1.0),
+        A.HorizontalFlip(),
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ToTensorV2()
+    ])
+
     test_transform = A.Compose([
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
@@ -567,8 +564,8 @@ def inference_mil(patches_csv):
 
     loaders = Loaders()
     file_ids, train_ids, test_ids = loaders.train_test_ids(df, 0, seed, patient_id, label, False)
-    test_subset = loaders.df_loader(df, test_transform, test_ids, patient_id, label, subset=False)
-    test_slides = loaders.slides_dataloader(test_subset, test_ids, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
+    test_subset = loaders.df_loader(df, train_transform, test_transform, train_ids, test_ids, patient_id, label, subset=False)
+    test_slides = loaders.slides_dataloader(test_subset, train_ids, test_ids, train_transform, test_transform, slide_batch=10, num_workers=num_workers, shuffle=False, collate=collate_fn_none, label=label, patient_id=patient_id)
     embedding_net = VGG_embedding(embedding_vector_size=1024, n_classes=n_classes)
     if use_gpu:
         embedding_net.to(device)
@@ -587,7 +584,7 @@ def inference_mil(patches_csv):
     test_graph_loader = DataLoader(test_graph_dict, batch_size=batch_size, shuffle=False, num_workers=num_workers, drop_last=False)
     graph_net = GAT_SAGPool(1024, heads=5, pooling_ratio=0.7).to(device)
     loss_fn = nn.CrossEntropyLoss()
-    graph_net.load_state_dict(torch.load("./checkpoint_65.pth"), strict=True)
+    graph_net.load_state_dict(torch.load("./checkpoint_86.pth"), strict=True)
 
     labels = test_graph_multi_wsi(graph_net, test_graph_loader, loss_fn, n_classes=n_classes)
     return labels
