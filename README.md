@@ -1,6 +1,6 @@
 # Cell-Segmentation-in-Hematology-MIL
 
-This repository contains the implementation and documentation for our research on enhancing leukemia subtype classification through innovative machine learning techniques. Developed at Mohamed Bin Zayed University of Artificial Intelligence, this project integrates Multiple Instance Learning (MIL) with advanced cell-level segmentation to address the complexities of accurately diagnosing different leukemia subtypes.
+This repository contains the implementation and documentation for our research on enhancing leukemia subtype classification through innovative machine learning techniques. Developed at Mohamed Bin Zayed University of Artificial Intelligence, this project integrates Multiple Instance Learning (MIL) with advanced cell-level segmentation to address the complexities of diagnosing different leukemia subtypes accurately.
 
 ## Background
 
@@ -58,7 +58,7 @@ To train the classification models:
 
 ```bash
 cd Classification
-pythin train.py
+python train.py
 ```
 
 To train the Multiple Instance Learning Models:
